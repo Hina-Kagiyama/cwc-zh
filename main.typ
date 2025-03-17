@@ -759,7 +759,56 @@ CPS 语言中的变量使用方式 在许多方面类似于#ruby[冯·诺伊曼]
 
 = CPS 的语义 <chp3>
 
-#text(size: 2em)[译者注：目前翻译工作到这里。]
+CPS表达式的含义可以通过一种简单的#ruby[指称语义][denotaional semantics]给出。完整的语义定义见 @chpb；这里我们沿用该语义定义的#ruby[结构][structure]，进行更为非正式的讨论。如果读者对#ruby[指称语义][denotational syntax]感到不适，可以只阅读本章正文，而略过代码部分的“语义”内容。所有CPS的变体——无论应用了作用域规则、自由变量规则以及语言相关规则的哪种子集——均遵循该语义。
+
+下面给出的是一种直接的、使用Standard ML编写的#ruby[续体语义][continuation semantics]。读者如果熟悉续体语义（参见例如 Stoy @bib84、Gordon @bib43 或Schmidt @bib77）以及ML语言（参见例如Milner @bib65、Reade @bib68 或Paulson @bib67），将更易于理解下文。通过给出针对我们CPS表示的#ruby[形式化语义][formal semantics]，我们希望能让读者独立验证后续章节所介绍的变换，尽管我们很少会给出正式的证明。
+
+#figure[```sml
+functor CPSsemantics(structure CPS: CPS ...
+```]
+
+该语义以Standard ML中的#ruby[函子][functor]形式编写。它以（形式上的）一个CPS结构（参见@fig2.1）作为参数，同时还包括：
+
+#figure[```sml
+val minint: int
+val maxint: int
+val minreal: real
+val maxreal: real
+```]
+
+我们不认为CPS作为模型所针对的底层机器架构应该具有无限精度的算术运算。必须存在某个最大和最小的可表示整数和实数。
+
+#figure[```sml
+val string2real: string -> real
+```]
+
+CPS语义将实数（浮点数）表示为字符串字面量，就像它们在源程序中被书写的方式一样（例如，`0.0`）。我们假设存在某种方法可以将其转换为机器表示。在编译的这一阶段，以字符串形式表示实数的实际原因是使CPS语言独立于特定的机器表示，从而使跨平台编译更加精确和容易。然而，这种表示方式的一个缺点是，使得实值表达式的#ruby[常量折叠][constant folding]变得非常困难。
+
+在#ruby[指称语义][denotational semantics]中，具有对内存副作用的操作通常通过“#ruby[存储][store]”来表示。每个存储值可以被视为从#ruby[位置][locations]（地址）到#ruby[可指称值][denotable values]的映射。位置的类型`loc`，以及用于生成新位置的函数，都是语义的参数。该类型必须支持值的相等性测试（即为#ruby[等价类型][`eqtype`]）。
+
+#figure[```sml
+val arbitrarily: 'a * 'a -> 'a
+```]
+
+有些事物无法由语义预测。为了对这种不可预测性建模，表达式`arbitrarily(a, b)`的求值结果可以是 `a` 或 `b` 之一。该表达式仅用于指针比较；关于相等性测试，详见@sec3.3。
+
+#figure[```sml
+type answer
+```]
+
+按照#ruby[续体语义][continuation semantics]的传统，我们引入一个类型`answer`，用于表示程序整个执行过程的结果。我们实际上并不需要了解该类型的具体结构。
+
+#figure[```sml
+datatype dvalue =
+ RECORD of dvalue list * int
+| INT of int
+| REAL of real
+| FUNC of dvalue list -> (loc * (loc -> dvalue) * (loc -> int)) -> answer
+| STRING of string
+| BYTEARRAY of loc list
+| ARRAY of loc list
+| UARRAY of loc list
+```]
 
 = ML 特定的优化 <chp4>
 
@@ -767,7 +816,7 @@ CPS 语言中的变量使用方式 在许多方面类似于#ruby[冯·诺伊曼]
 
 == 模式匹配
 
-== 等价性
+== 等价性 <sec3.3>
 
 == Unboxed 更新
 
@@ -1374,7 +1423,7 @@ if i=j then eqlist(a,b) else false
 
 但是，如果两个列表的长度不同，那么递归调用最终会导致一个列表是`nil`而另一个不是。在这种情况下，没有任何模式可以匹配，运行时会抛出#ruby[`Match`异常][runtime exception `Match`]。
 
-= CPS 的语义
+= CPS 的语义 <chpb>
 
 这个语义在@chp3 中有详细说明。
 
