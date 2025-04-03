@@ -1078,11 +1078,189 @@ fun evalprim (CPS.+ : CPS.primop,
 
 `store` 操作符是针对字节数组的，与数组的 `update` 操作符等价。字符串是不可写的，不能被更新。字符串和字节数组都只能保存“单字节”值（即介于 $0$ 到 $255$ 之间的整数）。
 
-#text(size: 2em)[到达原书 P32，今天先干到这里。——译者注]
+#figure[```sml
+| evalprim (CPS.makeref, [v],[c]) = (fn (l,f,g) =>
+               c [ARRAY[l]] (upd((nextloc l, f,g),l,v)))
+| evalprim (CPS.makerefunboxed, [INT v],[c]) = (fn (l,f,g) =>
+               c [UARRAY[l]] (updi((nextloc l, f,g),l,v)))
+```]
+
+长度为一的数组（在ML中称为“ref”）可以使用 `makeref` 运算符进行分配。CPS语言中无法分配更大的数组；这部分功能预期由实现提供一个外部函数（例如作为运行时系统的一部分）来完成。此类函数可以通过传递给 `eval` 函数的 `dvalue`参数，使CPS程序可以访问。
+
+`makerefunboxed` 运算符用于创建一个只包含整数值的引用；在使用分代垃圾回收器时，这非常有用。  
+注意，`: =` 或 `unboxedassign` 都可以用于任意类型的引用，只要 `unboxedassign` 仅用于存储整数值（可能属于非总是装箱的类型），且“unboxed”引用仅包含整数值即可。
+
+#figure[```sml
+| evalprim (CPS.alength, [ARRAY a], [c]) =
+                           c [INT(List.length a)]
+| evalprim (CPS.alength, [UARRAY a], [c]) =
+                           c [INT(List.length a)]
+| evalprim (CPS.slength, [BYTEARRAY a], [c]) =
+                           c [INT(List.length a)]
+| evalprim (CPS.slength, [STRING a], [c]) =
+                           c [INT(String.size a)]
+```]
+
+`alength` 函数可用于提取数组的长度（即元素的数量）；`slength` 则用于字符串和字节数组，作用相同。注意，数组的长度是固定的，尽管其元素的值在存储中是可变的。
+
+#figure[```sml
+| evalprim (CPS.gethdlr, [], [c]) =
+                    (fn s => c [fetch s handler_ref] s)
+| evalprim (CPS.sethdlr, [h], [c]) =
+                    (fn s => c [] (upd(s,handler_ref,h)))
+```]
+
+操作符 `gethdlr` 返回当前的异常处理器（从存储中提取），而 `sethdlr` 则使用新的异常处理器更新存储。在实现中，可以选择将异常处理器保存在寄存器中，而非内存中，因为在此语义中，`handler_ref` 这一位置的使用方式并不具有普遍性。
+
+#figure[```sml
+| evalprim (CPS.fadd, [REAL a, REAL b],[c]) =
+                              overflowr(fn()=>a+b, c)
+| evalprim (CPS.fsub, [REAL a, REAL b],[c]) =
+                              overflowr(fn()=>a-b, c)
+| evalprim (CPS.fmul, [REAL a, REAL b],[c]) =
+                              overflowr(fn()=>a*b, c)
+| evalprim (CPS.fdiv, [REAL a, REAL 0.0],[c]) =
+                              do_raise div_exn
+| evalprim (CPS.fdiv, [REAL a, REAL b],[c]) =
+                              overflowr(fn()=>a/b, c)
+| evalprim (CPS.feql, [REAL a, REAL b],[t,f]) =
+                              if a=b then t[] else f[]
+| evalprim (CPS.fneq, [REAL a, REAL b],[t,f]) =
+                              if a=b then f[] else t[]
+| evalprim (CPS.flt,[REAL i,REAL j],[t,f]) =
+                              if i<j then t[] else f[]
+| evalprim (CPS.fle,[REAL i,REAL j],[t,f]) =
+                              if j<i then f[] else t[]
+| evalprim (CPS.fgt,[REAL i,REAL j],[t,f]) =
+                              if j<i then t[] else f[]
+| evalprim (CPS.fge,[REAL i,REAL j],[t,f]) =
+                              if i<j then f[] else t[]
+```]
+
+浮点数的算术运算和比较运算符与整数的运算符类似。
+
+#figure[```sml
+type env = CPS.var -> dvalue
+```]
+
+其余的语义部分使用了“#ruby[环境][environment]”的概念：即一个从CPS变量到可表示值的映射。那些将结果绑定到变量上CPS操作符，会通过扩展环境来实现绑定。而那些以变量作为参数的CPS操作符，则会从环境中提取这些变量对应的值。
+
+#figure[```sml
+fun V env (CPS.INT i) = INT i
+  | V env (CPS.REAL r) = REAL(string2real r)
+  | V env (CPS.STRING s) = STRING s
+  | V env (CPS.VAR v) = env v
+  | V env (CPS.LABEL v) = env v
+```]
+
+函数 `V` 用于将一个CPS值转换为一个可表示值。对于常量，这一过程相当直接；而变量（以及在此语义中等价的#ruby[标签][labels]）则必须在环境中查找。
+
+#figure[```sml
+fun bind(env:env, v:CPS.var, d) =
+                fn w => if v=w then d else env w
+fun bindn(env, v::vl, d::dl) = bindn(bind(env,v,d),vl,dl)
+  | bindn(env, nil, nil)     = env
+```]
+
+函数 `bind` 只对#ruby[环境][environment]进行更新，生成一个新的环境。对于需要将多个值绑定到多个变量上的情况，额外定义 `bindn`。
+
+#figure[```sml
+fun F (x, CPS.OFFp 0) = x
+  | F (RECORD(l,i), CPS.OFFp j) = RECORD(l,i+j)
+  | F (RECORD(l,i), CPS.SELp(j,p)) = F(nth(l,i+j), p)
+```]
+
+在#ruby[CPS语言][CPS language]中，一个#ruby[记录体字段][record field]被表示为一个值和一个“#ruby[访问路径][access path]”。访问路径只是一个由一连串的选择操作组成的链，最终以一个偏移量结束。例如，记录字段表达式 `(v,SELp(3,SELp(1, OFFp 2)))` 表示先获取 `v` 的第 3 个字段，然后获取结果的第 1 个字段，再对该结果进行两个字的偏移（不进行取值操作），最终得到的结果被放入新的记录中。@chp11 中解释了这样设计的必要性。
+
+访问路径 `OFFp 0` 对字段值没有任何影响；它是唯一可以应用于非记录体值（例如整数、实数等）的路径。
+
+函数 `E` 用于获取一个CPS表达式的#ruby[指称][denotation]。这种指称的类型为 `env->store->answer`，总共只有七种情况：
+
+#figure[```sml
+fun E (CPS.SELECT(i,v,w,e)) env =
+                   let val RECORD(l,j) = V env v
+                    in E e (bind(env,w,nth(l,i+j)))
+                   end
+  | E (CPS.OFFSET(i,v,w,e)) env =
+                   let val RECORD(l,j) = V env v
+                    in E e (bind(env,w,RECORD(l,i+j)))
+                   end
+```]
+
+为了计算一个 `SELECT`，首先从#ruby[环境][environment]中提取值 $v$；该值必须是一个#ruby[记录体][record]，否则该表达式是未定义的。然后，将索引 $i$ 加到偏移量 $j$ 上，并将记录中对应的元素绑定到变量 $w$ 上，形成一个新的环境。该新环境随后被用作子表达式 $e$ 的求值参数。`OFFSET` 的求值方式类似，不同之处在于索引与偏移量相加后，并不选择字段；而是将带有新偏移量的记录绑定到 $w$。
+
+#figure[```sml
+| E (CPS.APP(f,vl)) env =
+                 let val FUNC g = V env f
+                  in g (map (V env) vl)
+                 end
+```]
+
+#ruby[函数应用][function application]相当简单：变量 $f$ 必须代表某个函数 $g$。参数 $"vl"$ 全部从#ruby[环境][environment]中提取，对得到的值列表应用 $g$。注意，并没有将环境传递给 $g$；这表明CPS语言具有#ruby[词法作用域][lexical scope]（#ruby[静态作用域][static scope]），而不是#ruby[动态作用域][dynamic scope]。
+
+对于不熟悉 ML 的读者，我们在此说明：`map` 函数接受一个函数（在此为 `V env`）和一个列表（在此为 `vl`），并返回一个新列表，其元素是通过将该函数应用于原列表中的每个元素而得到的（在本例中，即从#ruby[环境][environment]中查找 `vl` 中每个值所得到的结果）。
+
+#figure[```sml
+| E (CPS.RECORD(vl,w,e)) env =
+                 E e (bind(env,w,
+                        RECORD(map (fn (x,p) =>
+                                     F(V env x, p)) vl, 0)))
+```]
+
+为了创建一个#ruby[记录体][record]，首先需要从#ruby[环境][environment]中提取所有字段（`V env x`）；然后，对于每个字段，由函数 `F` 计算其访问路径 $p$ 中隐含的 `SELp` 和 `OFFp` 操作。接着，构造一个偏移量为 $0$ 的 `RECORD`，并将其绑定到 $w$。
+
+#figure[```sml
+| E (CPS.SWITCH(v,el)) env =
+                 let val INT i = V env v
+                  in E (nth(el,i)) env
+                 end
+```]
+
+#ruby[分支表达式][switch expressions]相当简单：先对 $v$ 求值得到一个整数 $i$，然后对第 $i$ 个#ruby[续延][continuation]进行求值。需要注意的是，每一个续延表达式都会继续执行恰好一个续延的求值。对于 `RECORD`、`SELECT` 和 `OFFSET`，这一点在语法上是显而易见的；对于可能包含多个语法续延表达式作为参数的 `SWITCH` 或 `PRIMOP`，这一行为由语义来强制保证；而在 `APP` 中，续延表达式可能“隐藏”在被应用的函数 $f$ 的函数体内。
+
+#figure[```sml
+| E (CPS.PRIMOP(p,vl,wl,el)) env =
+                evalprim(p,
+                         map (V env) vl,
+                         map (fn e => fn al =>
+                               E e (bindn(env,wl,al)))
+                             el)
+```]
+
+为了对一个#ruby[基本操作符][primitive operator]进行求值，首先需要从#ruby[环境][environment]中提取所有的#ruby[原子参数][atomic arguments]（`map (V env) vl`）。然后，将所有的#ruby[复合表达式参数][cexp arguments]转换为类型为 `dvalue list -> store -> answer` 的函数。接着，原子参数列表与续延列表（以及操作符 $p$）一并传递给 `evalprim` 函数，该函数执行相应的操作，并选择一个续延来接收结果。
+
+#figure[```sml
+| E (CPS.FIX(fl,e)) env =
+          let fun h r1 (f,vl,b) =
+                 FUNC(fn al => E b (bindn(g r1,vl,al)))
+              and g r = bindn(r, map #1 fl, map (h r) fl)
+           in E e (g env)
+          end
+```]
+
+对#ruby[互相递归的函数][mutually recursive functions]的定义稍显复杂。本质上，我们只是在线程增强后的环境 $g(e n v)$ 中对表达式 $e$ 进行求值。函数 $g$ 以环境 $r$ 作为参数，并返回将所有函数名（`map #1 fl`）绑定到函数体（`map (h r) fl`）之后的增强环境 $r$。
+
+函数 $h$ 用于定义单个函数；它接受一个环境 $r_1$ 和一个函数定义 `(f, vl, b)`，其中 $f$ 是函数名，$v l$ 是形式参数列表，$b$ 是函数体。其结果是一个函数（`fn al => ...`），该函数接受一个实际参数列表 $a l$，并通过两种方式扩展环境 $r_1$：首先，它应用 $g$ 来重新定义所有在 $f l$ 中的（互相递归的）函数；然后，它将实际参数绑定到形式参数。最终生成的环境用于对函数体 $b$ 进行求值。
+
+函数 $g$ 与 $h$ 是#ruby[互相递归的][mutually recursive]；我们在语义中使用递归来实现CPS函数的互相递归。
+
+注意，实际参数的数量必须与形式参数的数量相同，否则 `bindn` 将是未定义的。在我们的CPS语言中，不存在参数数量可变的函数。
+
+#figure[```sml
+    val env0 = fn x => raise Undefined
+    fun eval (vl,e) dl = E e (bindn(env0,vl,dl))
+end
+```]
+
+最后#footnote[译者注：最后这个 ```sml end``` 是用于结束整个 functor 的。]，函数 `eval` 接受一个变量列表、一个值列表以及一个#ruby[续延表达式][continuation expression]；它将在空#ruby[环境][environment]中把这些值绑定到对应的变量上，然后返回该表达式在所得环境中的#ruby[指称][denotation]。
 
 = ML 特定的优化 <chp4>
 
+在使用#ruby[续延传递风格][continuation-passing style]的编译器中，大多数优化（部分求值、#ruby[数据流][dataflow]、#ruby[寄存器分配][register allocation]等）应当在CPS表示中完成。然而，一些表示决策最好在更接近源语言的层级上完成。这里我们将描述一些特定于ML的优化，它们在转换为CPS之前完成。这些优化大多与#ruby[静态类型][static types]相关，因此最自然的做法是在CPS转换过程中类型信息被移除之前进行这些优化。
+
 == 数据的内存布局 <sec4.1>
+
+#text(size: 2em)[译者注：暂时工作到这里，这里是原书 P37。]
 
 == 模式匹配
 
